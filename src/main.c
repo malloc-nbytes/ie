@@ -39,8 +39,6 @@ struct {
         uint32_t flags;
 } g_config;
 
-forge_logger logger = {0};
-
 typedef struct {
         struct {
                 struct termios t;
@@ -54,7 +52,10 @@ typedef struct {
         char *filepath;
         sizet_set marked;
         const char *last_query;
+        size_t hoffset;
 } fex_context;
+
+static void minisleep(void) { usleep(700000/2); }
 
 static void
 selection_up(fex_context *ctx)
@@ -155,8 +156,19 @@ remove_selection(fex_context *ctx)
 }
 
 static void
+clearln(fex_context *ctx)
+{
+        for (size_t i = 0; i < ctx->term.w; ++i) putchar(' ');
+        forge_ctrl_cursor_to_col(1);
+}
+
+static void
 rename_selection(fex_context *ctx)
 {
+        CURSOR_UP(1);
+        clearln(ctx);
+        printf(BOLD WHITE "--- Rename ---" RESET);
+
         const char *path = ctx->selection.files.data[ctx->selection.i];
 
         forge_ctrl_cursor_to_first_line();
@@ -201,6 +213,23 @@ search(fex_context *ctx,
         }
 }
 
+static int
+ctrl_x(fex_context *ctx)
+{
+        char ch;
+        forge_ctrl_input_type ty = forge_ctrl_get_input(&ch);
+
+        if (ty == USER_INPUT_TYPE_NORMAL && ch == '\n') {
+                return cd_selection(ctx, "..");
+        }
+ bad:
+        CURSOR_UP(1);
+        clearln(ctx);
+        printf(INVERT BOLD RED "Unknown Sequence" RESET "\n");
+        minisleep();
+        return 0;
+}
+
 static void
 display(fex_context *ctx)
 {
@@ -219,8 +248,6 @@ display(fex_context *ctx)
 
         while (1) {
                 forge_ctrl_clear_terminal();
-
-                forge_logger_log(&logger, FORGE_LOG_LEVEL_DEBUG, "directory: %s", ctx->filepath);
 
                 if (fs_changed) {
                         files = ls(ctx->filepath);
@@ -247,14 +274,22 @@ display(fex_context *ctx)
                         ctx->selection.files.data[1] = files[1];
                 }
 
+                while (ctx->selection.i > ctx->selection.files.len-1) {
+                        --ctx->selection.i;
+                }
+
                 char *abspath = forge_io_resolve_absolute_path(ctx->filepath);
-                printf("[" BOLD WHITE "%s" RESET "]\n", abspath);
+                printf("Directory listing for " BOLD WHITE "%s" RESET "\n", abspath);
                 free(abspath);
 
                 size_t dirs_n = 0;
 
                 // Print files
-                for (size_t i = 0; files[i]; ++i) {
+                size_t start = ctx->hoffset;
+                size_t end = start + ctx->term.h - 2;
+                if (end > ctx->selection.files.len)
+                        end = ctx->selection.files.len;
+                for (size_t i = start; i < end; ++i) {
                         int is_selected = i == ctx->selection.i;
 
                         if (forge_io_is_dir(files[i])) {
@@ -284,6 +319,7 @@ display(fex_context *ctx)
                         printf(RESET);
                 }
 
+                // Directory status
                 printf(BOLD WHITE "%zu files, %zu directories" RESET "\n",
                        ctx->selection.files.len - dirs_n, dirs_n - 2);
 
@@ -302,6 +338,7 @@ display(fex_context *ctx)
                 case USER_INPUT_TYPE_CTRL: {
                         if      (ch == CTRL_N) selection_down(ctx);
                         else if (ch == CTRL_P) selection_up(ctx);
+                        else if (ch == CTRL_X) fs_changed = ctrl_x(ctx);
                 } break;
                 case USER_INPUT_TYPE_NORMAL: {
                         if      (ch == 'q') goto done;
@@ -326,6 +363,7 @@ display(fex_context *ctx)
                                 } else {
                                         sizet_set_insert(&ctx->marked, ctx->selection.i);
                                 }
+                                selection_down(ctx);
                         } else if (ch == '/') {
                                 search(ctx, /*jmp=*/0, /*rev=*/0);
                         } else if (ch == 'n') {
@@ -335,6 +373,27 @@ display(fex_context *ctx)
                         }
                 } break;
                 default: break;
+                }
+
+                size_t visible_lines = ctx->term.h - 2;  // -2 for path + status line
+
+                // Scroll down when selection reaches bottom of screen
+                if (ctx->selection.i >= ctx->hoffset + visible_lines) {
+                        ctx->hoffset = ctx->selection.i - visible_lines + 1;
+                }
+
+                // Scroll up when selection reaches top of screen
+                if (ctx->selection.i < ctx->hoffset) {
+                        ctx->hoffset = ctx->selection.i;
+                }
+
+                // Clamp hoffset to valid range
+                if (ctx->hoffset + visible_lines > ctx->selection.files.len) {
+                        ctx->hoffset = ctx->selection.files.len > visible_lines ?
+                                ctx->selection.files.len - visible_lines : 0;
+                }
+                if (ctx->hoffset >= ctx->selection.files.len) {
+                        ctx->hoffset = 0;
                 }
 
                 if (fs_changed) {
@@ -358,10 +417,6 @@ display(fex_context *ctx)
 int
 main(int argc, char **argv)
 {
-        if (!forge_logger_init(&logger, "./log", FORGE_LOG_LEVEL_DEBUG)) {
-                forge_err("failed to init logger");
-        }
-
         struct termios t;
         size_t w, h;
         char *filepath = NULL;
@@ -374,7 +429,7 @@ main(int argc, char **argv)
                 } else if (arg->h == 2) {
                         forge_err("options are unimplemented");
                 } else {
-                        filepath = strdup(arg->s);
+                        filepath = forge_io_resolve_absolute_path(arg->s);
                 }
                 arg = arg->n;
         }
@@ -399,6 +454,7 @@ main(int argc, char **argv)
                 .filepath = filepath,
                 .marked = sizet_set_create(sizet_hash, sizet_cmp, NULL),
                 .last_query = NULL,
+                .hoffset = 0,
         };
 
         display(&ctx);
