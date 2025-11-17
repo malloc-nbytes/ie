@@ -183,6 +183,23 @@ rename_selection(fex_context *ctx)
 }
 
 static void
+enable_mouse(void)
+{
+        // Enable SGR mouse mode (works in almost all modern terminals)
+        printf("\033[?1006h");      // SGR extended mouse mode (best)
+        printf("\033[?1002h");      // Enable button-event tracking (optional: drag)
+        printf("\033[?1000h");      // Basic mouse tracking (fallback)
+        fflush(stdout);
+}
+
+static void
+disable_mouse(void)
+{
+    printf("\033[?1006l\033[?1002l\033[?1000l");
+    fflush(stdout);
+}
+
+static void
 search(fex_context *ctx,
        int          jmp,
        int          rev)
@@ -303,7 +320,8 @@ display(fex_context *ctx)
                                 printf(INVERT);
                         }
                         if (sizet_set_contains(&ctx->marked, i)) {
-                                printf(ORANGE);
+                                printf(PINK);
+                                printf("<M> ");
                         }
 
                         printf("%s", ctx->selection.files.data[i]);
@@ -412,6 +430,7 @@ display(fex_context *ctx)
         if (!forge_ctrl_disable_raw_terminal(STDIN_FILENO, &ctx->term.t)) {
                 forge_err("could not disable raw terminal");
         }
+        disable_mouse();
 }
 
 int
@@ -440,6 +459,7 @@ main(int argc, char **argv)
         if (!forge_ctrl_get_terminal_xy(&w, &h)) {
                 forge_err("could not get the terminal size");
         }
+        enable_mouse();
 
         fex_context ctx = {
                 .term = {
