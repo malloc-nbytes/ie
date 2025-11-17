@@ -5,7 +5,7 @@ src/fex
 src/1.bak
 *.so
 # Autotools generated files
-conf*
+#conf*
 !/src/forge/conf.h
 /src/t/test
 Makefile
