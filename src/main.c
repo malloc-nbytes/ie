@@ -248,7 +248,7 @@ display(fex_context *ctx)
                 }
 
                 char *abspath = forge_io_resolve_absolute_path(ctx->filepath);
-                printf("[" PINK BOLD "%s" RESET "]\n", abspath);
+                printf("[" BOLD WHITE "%s" RESET "]\n", abspath);
                 free(abspath);
 
                 size_t dirs_n = 0;
