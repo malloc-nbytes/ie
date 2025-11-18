@@ -29,12 +29,15 @@
 #include <time.h>
 #include <errno.h>
 
-static void rm_file(const char *fp);
-
 FORGE_SET_TYPE(size_t, sizet_set)
 
 struct {
         uint32_t flags;
+        struct {
+                struct termios t;
+                size_t w;
+                size_t h;
+        } term;
 } g_config;
 
 typedef struct {
@@ -45,11 +48,10 @@ typedef struct {
         int          stat_failed;
 } FE;
 
-DYN_ARRAY_TYPE(FE, FE_array);
+DYN_ARRAY_TYPE(FE *, FE_array);
 
 typedef struct {
         struct {
-                struct termios t;
                 size_t w;
                 size_t h;
         } term;
@@ -63,6 +65,19 @@ typedef struct {
         size_t hoffset;
 } ie_context;
 
+DYN_ARRAY_TYPE(ie_context *, ie_context_array);
+
+static void rm_file(const char *fp);
+static void display(void);
+
+struct {
+        size_t ctxs_i;
+        ie_context_array ctxs;
+} g_state = {
+        .ctxs_i = 0,
+        .ctxs = dyn_array_empty(ie_context_array),
+};
+
 unsigned
 sizet_hash(size_t *i)
 {
@@ -73,6 +88,22 @@ int
 sizet_cmp(size_t *x, size_t *y)
 {
         return *x - *y;
+}
+
+static ie_context *
+ie_context_alloc(const char *filepath)
+{
+        ie_context *ctx  = (ie_context *)malloc(sizeof(ie_context));
+        ctx->term.w      = g_config.term.w;
+        ctx->term.h      = g_config.term.h;
+        ctx->entries.i   = 0;
+        ctx->entries.fes = dyn_array_empty(FE_array);
+        ctx->filepath    = strdup(filepath);
+        ctx->marked      = sizet_set_create(sizet_hash, sizet_cmp, NULL);
+        ctx->last_query  = NULL;
+        ctx->hoffset     = 0;
+
+        return ctx;
 }
 
 static void minisleep(void) { usleep(800000/2); }
@@ -189,7 +220,7 @@ static int
 clicked(ie_context *ctx,
         const char  *to)
 {
-        const FE *fe = &ctx->entries.fes.data[ctx->entries.i];
+        const FE *fe = ctx->entries.fes.data[ctx->entries.i];
 
         if (forge_io_is_dir(to)) {
                 free(ctx->filepath);
@@ -263,7 +294,7 @@ remove_selection(ie_context *ctx)
         if (sizet_set_size(&ctx->marked) > 0) {
                 size_t **ar = sizet_set_iter(&ctx->marked);
                 for (size_t i = 0; ar[i]; ++i) {
-                        char *path = ctx->entries.fes.data[*ar[i]].name;
+                        char *path = ctx->entries.fes.data[*ar[i]]->name;
                         if (!strcmp(path, "..") || !strcmp(path, ".")) {
                                 continue;
                         }
@@ -272,7 +303,7 @@ remove_selection(ie_context *ctx)
                 }
                 free(ar);
         } else {
-                char *path = ctx->entries.fes.data[ctx->entries.i].name;
+                char *path = ctx->entries.fes.data[ctx->entries.i]->name;
                 if (!strcmp(path, "..") || !strcmp(path, ".")) {
                         return;
                 }
@@ -311,7 +342,7 @@ rename_selection(ie_context *ctx)
         clearln(ctx);
         printf(BOLD WHITE "--- Rename ---" RESET);
 
-        const char *path = ctx->entries.fes.data[ctx->entries.i].name;
+        const char *path = ctx->entries.fes.data[ctx->entries.i]->name;
 
         forge_ctrl_cursor_to_first_line();
         CURSOR_DOWN(ctx->entries.i + 1);
@@ -344,14 +375,14 @@ search(ie_context *ctx,
 
         if (!rev) {
                 for (size_t i = ctx->entries.i+1; i < ctx->entries.fes.len; ++i) {
-                        if (forge_utils_regex(ctx->last_query, ctx->entries.fes.data[i].name)) {
+                        if (forge_utils_regex(ctx->last_query, ctx->entries.fes.data[i]->name)) {
                                 ctx->entries.i = i;
                                 break;
                         }
                 }
         } else {
                 for (size_t i = ctx->entries.i-1; i > 0; --i) {
-                        if (forge_utils_regex(ctx->last_query, ctx->entries.fes.data[i].name)) {
+                        if (forge_utils_regex(ctx->last_query, ctx->entries.fes.data[i]->name)) {
                                 ctx->entries.i = i;
                                 break;
                         }
@@ -369,7 +400,31 @@ ctrl_x(ie_context *ctx)
                 return clicked(ctx, "..");
         } else if (ty == USER_INPUT_TYPE_CTRL && ch == CTRL_Q) {
                 return rename_selection(ctx);
+        } else if (ty == USER_INPUT_TYPE_NORMAL && ch == 'c') {
+                dyn_array_append(g_state.ctxs, ie_context_alloc(ctx->filepath));
+                ++g_state.ctxs_i;
+                return 1;
+        } else if (ty == USER_INPUT_TYPE_NORMAL && ch == 'b') {
+                size_t ctxs_n = g_state.ctxs.len;
+                char **choices = (char **)malloc(sizeof(char *) * ctxs_n);
+                for (size_t i = 0; i < ctxs_n; ++i) {
+                        choices[i] = g_state.ctxs.data[i]->filepath;
+                }
+                int choice = forge_chooser("Choose Buffer",
+                                           (const char **)choices,
+                                           ctxs_n, g_state.ctxs_i);
+
+                free(choices);
+
+                if (choice == -1)             return 0;
+                if (choice == g_state.ctxs_i) return 0;
+
+                size_t old_ctxs_i = g_state.ctxs_i;
+                g_state.ctxs_i = choice;
+
+                return 1;
         }
+
  bad:
         CURSOR_UP(1);
         clearln(ctx);
@@ -419,23 +474,25 @@ mark_or_unmark_selection(ie_context *ctx, int mark)
 }
 
 static void
-display(ie_context *ctx)
+display(void)
 {
-        assert(ctx->filepath);
-
-        CD(ctx->filepath, forge_err_wargs("could not cd() to %s", ctx->filepath));
-
-        if (!forge_ctrl_enable_raw_terminal(STDIN_FILENO, &ctx->term.t)) {
-                forge_err("could not enable raw terminal");
-        }
-
-        ctx->entries.i = 0;
-
-        int fs_changed  = 1;
-        char **files    = NULL;
+        int fs_changed     = 1;
+        char **files       = NULL;
+        size_t last_ctxs_i = g_state.ctxs_i;
+        int first          = 1;
 
         while (1) {
                 forge_ctrl_clear_terminal();
+
+                ie_context *ctx = g_state.ctxs.data[g_state.ctxs_i];
+                CD(ctx->filepath, forge_err_wargs("could not cd() to %s", ctx->filepath));
+
+                if (first || g_state.ctxs_i != last_ctxs_i) {
+                        first = 0;
+                        ctx->entries.i = 0;
+                        fs_changed = 1;
+                        last_ctxs_i = g_state.ctxs_i;
+                }
 
                 if (fs_changed) {
                         files = ls(ctx->filepath);
@@ -450,21 +507,21 @@ display(ie_context *ctx)
                         qsort(files, count, sizeof(*files), is_like_compar);
                         for (size_t i = 0; i < count; ++i) {
                                 char *fullpath = forge_io_resolve_absolute_path(files[i]);
-                                FE fe = {0};
-                                fe.name = files[i];
-                                fe.owner = NULL;
-                                fe.group = NULL;
-                                fe.stat_failed = (lstat(fullpath, &fe.st) == -1);
+                                FE *fe = (FE *)malloc(sizeof(FE));
+                                fe->name = files[i];
+                                fe->owner = NULL;
+                                fe->group = NULL;
+                                fe->stat_failed = (lstat(fullpath, &fe->st) == -1);
 
-                                if (!fe.stat_failed) {
-                                        struct passwd *pw = getpwuid(fe.st.st_uid);
-                                        struct group  *gr = getgrgid(fe.st.st_gid);
-                                        fe.owner = pw ? strdup(pw->pw_name) : strdup("?");
-                                        fe.group = gr ? strdup(gr->gr_name) : strdup("?");
+                                if (!fe->stat_failed) {
+                                        struct passwd *pw = getpwuid(fe->st.st_uid);
+                                        struct group  *gr = getgrgid(fe->st.st_gid);
+                                        fe->owner = pw ? strdup(pw->pw_name) : strdup("?");
+                                        fe->group = gr ? strdup(gr->gr_name) : strdup("?");
                                 } else {
-                                        fe.owner = strdup("?");
-                                        fe.group = strdup("?");
-                                        memset(&fe.st, 0, sizeof(fe.st));
+                                        fe->owner = strdup("?");
+                                        fe->group = strdup("?");
+                                        memset(&fe->st, 0, sizeof(fe->st));
                                 }
 
                                 dyn_array_append(ctx->entries.fes, fe);
@@ -489,7 +546,7 @@ display(ie_context *ctx)
                 if (end > ctx->entries.fes.len)
                         end = ctx->entries.fes.len;
                 for (size_t i = start; i < end; ++i) {
-                        FE *e = &ctx->entries.fes.data[i];
+                        FE *e = ctx->entries.fes.data[i];
                         int is_selected = (i == ctx->entries.i);
                         int is_marked   = sizet_set_contains(&ctx->marked, i);
                         int is_dir      = !e->stat_failed && S_ISDIR(e->st.st_mode);
@@ -591,7 +648,7 @@ display(ie_context *ctx)
                                 fs_changed = rename_selection(ctx);
                         }
                         else if (ch == '\n') {
-                                if (clicked(ctx, ctx->entries.fes.data[ctx->entries.i].name)) {
+                                if (clicked(ctx, ctx->entries.fes.data[ctx->entries.i]->name)) {
                                         ctx->entries.i = 0;
                                         fs_changed = 1;
                                 }
@@ -638,8 +695,8 @@ display(ie_context *ctx)
                 if (fs_changed) {
                         for (size_t i = 0; files[i]; ++i) {
                                 free(files[i]);
-                                free(ctx->entries.fes.data[i].owner);
-                                free(ctx->entries.fes.data[i].group);
+                                free(ctx->entries.fes.data[i]->owner);
+                                free(ctx->entries.fes.data[i]->group);
                         }
                         free(files);
                         dyn_array_clear(ctx->entries.fes);
@@ -649,18 +706,14 @@ display(ie_context *ctx)
 
  done:
         forge_ctrl_clear_terminal();
-
-        if (!forge_ctrl_disable_raw_terminal(STDIN_FILENO, &ctx->term.t)) {
-                forge_err("could not disable raw terminal");
-        }
 }
 
 int
 main(int argc, char **argv)
 {
         struct termios t;
-        size_t w, h;
         char *filepath = NULL;
+        size_t w, h;
 
         forge_arg *arghd = forge_arg_alloc(argc, argv, 1);
         forge_arg *arg = arghd;
@@ -678,27 +731,21 @@ main(int argc, char **argv)
 
         if (!filepath) filepath = cwd();
 
-        if (!forge_ctrl_get_terminal_xy(&w, &h)) {
+        if (!forge_ctrl_get_terminal_xy(&g_config.term.w, &g_config.term.h)) {
                 forge_err("could not get the terminal size");
         }
 
-        ie_context ctx = {
-                .term = {
-                        .t = t,
-                        .w = w,
-                        .h = h,
-                },
-                .entries = {
-                        .i = 0,
-                        .fes = dyn_array_empty(FE_array),
-                },
-                .filepath = filepath,
-                .marked = sizet_set_create(sizet_hash, sizet_cmp, NULL),
-                .last_query = NULL,
-                .hoffset = 0,
-        };
+        if (!forge_ctrl_enable_raw_terminal(STDIN_FILENO, &g_config.term.t)) {
+                forge_err("could not enable raw terminal");
+        }
 
-        display(&ctx);
+        dyn_array_append(g_state.ctxs, ie_context_alloc(filepath));
+
+        display();
+
+        if (!forge_ctrl_disable_raw_terminal(STDIN_FILENO, &g_config.term.t)) {
+                forge_err("could not disable raw terminal");
+        }
 
         return 0;
 }
