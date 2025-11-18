@@ -29,12 +29,15 @@
 #include <time.h>
 #include <errno.h>
 
-static void rm_file(const char *fp);
-
 FORGE_SET_TYPE(size_t, sizet_set)
 
 struct {
         uint32_t flags;
+        struct {
+                struct termios t;
+                size_t w;
+                size_t h;
+        } term;
 } g_config;
 
 typedef struct {
@@ -49,7 +52,6 @@ DYN_ARRAY_TYPE(FE, FE_array);
 
 typedef struct {
         struct {
-                struct termios t;
                 size_t w;
                 size_t h;
         } term;
@@ -63,6 +65,19 @@ typedef struct {
         size_t hoffset;
 } ie_context;
 
+DYN_ARRAY_TYPE(ie_context *, ie_context_array);
+
+static void rm_file(const char *fp);
+static void display(ie_context *ctx);
+
+struct {
+        size_t ctxs_i;
+        ie_context_array ctxs;
+} g_state = {
+        .ctxs_i = 0,
+        .ctxs = dyn_array_empty(ie_context_array),
+};
+
 unsigned
 sizet_hash(size_t *i)
 {
@@ -73,6 +88,22 @@ int
 sizet_cmp(size_t *x, size_t *y)
 {
         return *x - *y;
+}
+
+static ie_context *
+ie_context_alloc(const char *filepath)
+{
+        ie_context *ctx = (ie_context *)malloc(sizeof(ie_context));
+        ctx->term.w      = g_config.term.w;
+        ctx->term.h      = g_config.term.h;
+        ctx->entries.i   = 0;
+        ctx->entries.fes = dyn_array_empty(FE_array);
+        ctx->filepath    = strdup(filepath);
+        ctx->marked      = sizet_set_create(sizet_hash, sizet_cmp, NULL);
+        ctx->last_query  = NULL;
+        ctx->hoffset     = 0;
+
+        return ctx;
 }
 
 static void minisleep(void) { usleep(800000/2); }
@@ -369,7 +400,12 @@ ctrl_x(ie_context *ctx)
                 return clicked(ctx, "..");
         } else if (ty == USER_INPUT_TYPE_CTRL && ch == CTRL_Q) {
                 return rename_selection(ctx);
+        } else if (ty == USER_INPUT_TYPE_NORMAL && ch == 'c') {
+                dyn_array_append(g_state.ctxs, ie_context_alloc(ctx->filepath));
+                display(g_state.ctxs.data[++g_state.ctxs_i]);
+                return 1;
         }
+
  bad:
         CURSOR_UP(1);
         clearln(ctx);
@@ -425,7 +461,7 @@ display(ie_context *ctx)
 
         CD(ctx->filepath, forge_err_wargs("could not cd() to %s", ctx->filepath));
 
-        if (!forge_ctrl_enable_raw_terminal(STDIN_FILENO, &ctx->term.t)) {
+        if (!forge_ctrl_enable_raw_terminal(STDIN_FILENO, &g_config.term.t)) {
                 forge_err("could not enable raw terminal");
         }
 
@@ -649,10 +685,6 @@ display(ie_context *ctx)
 
  done:
         forge_ctrl_clear_terminal();
-
-        if (!forge_ctrl_disable_raw_terminal(STDIN_FILENO, &ctx->term.t)) {
-                forge_err("could not disable raw terminal");
-        }
 }
 
 int
@@ -682,23 +714,14 @@ main(int argc, char **argv)
                 forge_err("could not get the terminal size");
         }
 
-        ie_context ctx = {
-                .term = {
-                        .t = t,
-                        .w = w,
-                        .h = h,
-                },
-                .entries = {
-                        .i = 0,
-                        .fes = dyn_array_empty(FE_array),
-                },
-                .filepath = filepath,
-                .marked = sizet_set_create(sizet_hash, sizet_cmp, NULL),
-                .last_query = NULL,
-                .hoffset = 0,
-        };
+        dyn_array_append(g_state.ctxs, ie_context_alloc(filepath));
 
-        display(&ctx);
+        display(g_state.ctxs.data[0]);
+
+
+        if (!forge_ctrl_disable_raw_terminal(STDIN_FILENO, &g_config.term.t)) {
+                forge_err("could not disable raw terminal");
+        }
 
         return 0;
 }
