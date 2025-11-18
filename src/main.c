@@ -405,6 +405,31 @@ ctrl_x(ie_context *ctx)
                 display(g_state.ctxs.data[++g_state.ctxs_i]);
                 CD(ctx->filepath, forge_err_wargs("failed to cd() to %s", ctx->filepath));
                 return 1;
+        } else if (ty == USER_INPUT_TYPE_NORMAL && ch == 'b') {
+                size_t ctxs_n = g_state.ctxs.len;
+                char **choices = (char **)malloc(sizeof(char *) * ctxs_n);
+                for (size_t i = 0; i < ctxs_n; ++i) {
+                        choices[i] = g_state.ctxs.data[i]->filepath;
+                }
+                int choice = forge_chooser("Choose Buffer",
+                                           (const char **)choices,
+                                           ctxs_n, g_state.ctxs_i);
+
+                free(choices);
+
+                if (choice == -1)             return 0;
+                if (choice == g_state.ctxs_i) return 0;
+
+                size_t old_ctxs_i = g_state.ctxs_i;
+                g_state.ctxs_i = choice;
+
+                display(g_state.ctxs.data[choice]);
+
+                CD(g_state.ctxs.data[old_ctxs_i]->filepath,
+                   forge_err_wargs("failed to cd() to %s",
+                                   g_state.ctxs.data[old_ctxs_i]->filepath));
+
+                return 1;
         }
 
  bad:
