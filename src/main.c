@@ -51,6 +51,7 @@ typedef struct {
 DYN_ARRAY_TYPE(FE *, FE_array);
 
 typedef struct {
+        int uid;
         struct {
                 size_t w;
                 size_t h;
@@ -102,6 +103,9 @@ ie_context_alloc(const char *filepath)
         ctx->marked      = sizet_set_create(sizet_hash, sizet_cmp, NULL);
         ctx->last_query  = NULL;
         ctx->hoffset     = 0;
+
+        static int uid = 0;
+        ctx->uid = uid++;
 
         return ctx;
 }
@@ -390,6 +394,30 @@ search(ie_context *ctx,
         }
 }
 
+static char **
+buffers_as_strings(const ie_context *ctx, size_t *paths_n)
+{
+        struct {
+                char **data;
+                size_t len;
+                size_t cap;
+        } ar = {
+                .data = NULL,
+                .len = 0,
+                .cap = 0,
+        };
+
+        for (size_t i = 0; i < g_state.ctxs_i; ++i) {
+                const ie_context *cur = g_state.ctxs.data[i];
+                if (cur->uid != ctx->uid) {
+                        dyn_array_append(ar, cur->filepath);
+                }
+        }
+
+        *paths_n = ar.len;
+        return ar.data;
+}
+
 static int
 ctrl_x(ie_context *ctx)
 {
@@ -471,6 +499,84 @@ mark_or_unmark_selection(ie_context *ctx, int mark)
                 selection_down(ctx);
         }
 
+}
+
+static int
+move_selection(ie_context *ctx)
+{
+        // Fail if no other buffer is open.
+        if (g_state.ctxs.len == 1) {
+                // TODO: add error message
+                return 0;
+        }
+
+        size_t paths_n = 0;
+        char **paths = buffers_as_strings(ctx, &paths_n);
+        int choice = forge_chooser("Choose Buffer",
+                                   (const char **)paths,
+                                   paths_n, 0);
+
+        free(paths);
+        if (choice == -1) return 0;
+
+        if (sizet_set_size(&ctx->marked) > 0) {
+                // move multiple files
+                size_t **idxs = sizet_set_iter(&ctx->marked);
+                for (size_t i = 0; idxs[i]; ++i) {
+                        char *oldpath_rel = ctx->entries.fes.data[*idxs[i]]->name;
+                        char *oldpath = forge_io_resolve_absolute_path(oldpath_rel);
+                        char *newpath = forge_cstr_builder(g_state.ctxs.data[choice]->filepath, "/",
+                                                           oldpath_rel,
+                                                           NULL);
+                        printf("%s -> %s\n", oldpath, newpath);
+                        free(newpath);
+                }
+
+                int yes = forge_chooser_yesno("Move?", NULL, 1);
+                if (yes) {
+                        for (size_t i = 0; idxs[i]; ++i) {
+                                char *oldpath_rel = ctx->entries.fes.data[*idxs[i]]->name;
+                                char *oldpath = forge_io_resolve_absolute_path(oldpath_rel);
+                                char *newpath = forge_cstr_builder(g_state.ctxs.data[choice]->filepath, "/",
+                                                                   oldpath_rel,
+                                                                   NULL);
+                                if (rename(oldpath, newpath) != 0) {
+                                        perror("rename");
+                                        forge_err_wargs("failed to move `%s` to `%s`", oldpath, newpath);
+                                }
+                                free(newpath);
+                                free(oldpath);
+                        }
+                        return 1;
+                }
+                return 0;
+        } else {
+                // single file
+                char *oldpath_rel = ctx->entries.fes.data[ctx->entries.i]->name;
+                char *oldpath =
+                        forge_io_resolve_absolute_path(
+                                ctx->entries.fes.data[ctx->entries.i]->name
+                        );
+                char *newpath = forge_cstr_builder(g_state.ctxs.data[choice]->filepath, "/",
+                                                   oldpath_rel,
+                                                   NULL);
+
+                printf("%s -> %s\n", oldpath, newpath);
+                int yes = forge_chooser_yesno("Move?", NULL, 1);
+
+                if (yes) {
+                        if (rename(oldpath, newpath) != 0) {
+                                perror("rename");
+                                forge_err_wargs("failed to move `%s` to `%s`", oldpath, newpath);
+                        }
+                        free(newpath);
+                        free(oldpath);
+                        return 1;
+                }
+                free(oldpath);
+                free(newpath);
+                return 0;
+        }
 }
 
 static void
@@ -666,6 +772,8 @@ display(void)
                                 ctx->entries.i = 0;
                         } else if (ch == 'G') {
                                 ctx->entries.i = ctx->entries.fes.len-1;
+                        } else if (ch == 'M') {
+                                fs_changed = move_selection(ctx);
                         }
                 } break;
                 default: break;

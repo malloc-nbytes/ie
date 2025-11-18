@@ -13,3 +13,4 @@
   - [ ] copy between panes
 - [ ] implement move
   - [ ] move between panes
+- [ ] implement terminal resizing
