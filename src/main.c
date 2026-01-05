@@ -270,7 +270,7 @@ endswith(const char *s)
 {
         assert(s);
         size_t n = strlen(s);
-        for (int i = n-1; i >= 0; --i) {
+        for (int i = n-1; i > 0 /* we do not want dotfiles */; --i) {
                 if (s[i] == '.') return s+i+1;
         }
         return NULL;
@@ -369,28 +369,29 @@ clicked(ie_context *ctx,
                         free(lns);
                         return 0;
                 }
-                // Save 'openwith' for future uses
-                size_t lns_n;
-                char **lns = forge_io_read_file_to_lines(g_config_filepath);
-                (void)forge_io_truncate_file(g_config_filepath);
+                if (ext) {
+                        // Save 'openwith' for future uses
+                        size_t lns_n;
+                        char **lns = forge_io_read_file_to_lines(g_config_filepath);
+                        (void)forge_io_truncate_file(g_config_filepath);
 
-                for (lns_n = 0; lns[lns_n]; ++lns_n);
-                lns = (char **)realloc(lns, sizeof(char *)*(lns_n+1));
+                        for (lns_n = 0; lns[lns_n]; ++lns_n);
+                        lns = (char **)realloc(lns, sizeof(char *)*(lns_n+1));
 
-                char cmd_buf[256] = {0};
-                sprintf(cmd_buf, "%s = '%s';", ext, openwith);
-                lns[lns_n++] = strdup(cmd_buf);
+                        char cmd_buf[256] = {0};
+                        sprintf(cmd_buf, "%s = '%s';", ext, openwith);
+                        lns[lns_n++] = strdup(cmd_buf);
 
-                // Adding new variable in-memory (to not re-parse config file).
-                qcl_add_value(&g_config.written_config, ext,
-                              (qcl_value *)qcl_value_string_alloc(openwith));
-                (void)forge_io_write_lines(g_config_filepath, (const char **)lns, lns_n);
+                        // Adding new variable in-memory (to not re-parse config file).
+                        qcl_add_value(&g_config.written_config, ext,
+                                      (qcl_value *)qcl_value_string_alloc(openwith));
+                        (void)forge_io_write_lines(g_config_filepath, (const char **)lns, lns_n);
 
-                for (size_t i = 0; i < lns_n; ++i) free(lns[i]);
-                free(lns);
+                        for (size_t i = 0; i < lns_n; ++i) free(lns[i]);
+                        free(lns);
+                }
 do_cmd:
                 assert(openwith);
-                assert(ext);
                 exec_cmd(openwith, to);
         }
         return 0;
