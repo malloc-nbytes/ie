@@ -1,3 +1,5 @@
+#define QCL_IMPL
+#include "qcl.h"
 #include "config.h"
 
 #include <forge/colors.h>
@@ -63,6 +65,9 @@ static char *g_help_buffer[] = {
         "  !                          - SHELL command",
 };
 
+#define CONFIG_FILENAME ".ie-config"
+static char g_config_filepath[1024] = {0};
+
 FORGE_SET_TYPE(size_t, sizet_set)
 
 struct {
@@ -72,7 +77,16 @@ struct {
                 size_t w;
                 size_t h;
         } term;
-} g_config;
+        qcl_config written_config;
+} g_config = {
+        .flags = 0x0000,
+        .term = {
+                .t = {0},
+                .w = 0,
+                .h = 0,
+        },
+        .written_config = {0},
+};
 
 typedef struct {
         char        *name;
@@ -251,6 +265,35 @@ any_key(void)
         char _; (void)forge_ctrl_get_input(&_);
 }
 
+static const char *
+endswith(const char *s)
+{
+        assert(s);
+        size_t n = strlen(s);
+        for (int i = n-1; i >= 0; --i) {
+                if (s[i] == '.') return s+i+1;
+        }
+        return NULL;
+}
+
+static void
+exec_cmd(const char *cmd,
+         const char *arg)
+{
+        pid_t pid = fork();
+
+        if (pid == 0) {
+                char *const argv[] = {
+                        (char *)cmd,
+                        (char *)arg,
+                        NULL
+                };
+
+                execvp(cmd, argv);
+                exit(EXIT_FAILURE);
+        }
+}
+
 static int
 clicked(ie_context *ctx,
         const char  *to)
@@ -262,7 +305,9 @@ clicked(ie_context *ctx,
                 ctx->filepath = forge_io_resolve_absolute_path(to);
                 CD(ctx->filepath, forge_err_wargs("could not cd() to %s", ctx->filepath));
                 return 1;
-        } else if (!fe->stat_failed && (fe->st.st_mode & (S_IXUSR|S_IXGRP|S_IXOTH))) {
+        } else if (!fe->stat_failed
+                   && (fe->st.st_mode & (S_IXUSR|S_IXGRP|S_IXOTH))
+                   && endswith(fe->name) == NULL) {
                 str_array args = dyn_array_empty(str_array);
                 dyn_array_append(args, fe->name);
 
@@ -300,21 +345,53 @@ clicked(ie_context *ctx,
                 dyn_array_free(args);
 
                 return 1;
-                /* if (WIFEXITED(status)) { */
-                /*         return WEXITSTATUS(status); */
-                /* } else if (WIFSIGNALED(status)) { */
-                /*         //printf("Child killed by signal %d\n", WTERMSIG(status)); */
-                /*         return 1; */
-                /* } */
         } else {
-                char **lns = forge_io_read_file_to_lines(to);
+                const char *ext       = endswith(to);
+                qcl_value *openwith_v = NULL;
+                const char *openwith  = NULL;
+
+                if (ext && (openwith_v = qcl_value_get(&g_config.written_config, ext))) {
+                        assert(openwith_v->kind == QCL_VALUE_KIND_STRING);
+                        openwith = ((qcl_value_string *)openwith_v)->s;
+                        goto do_cmd;
+                }
+
+                openwith = forge_rdln("Open file with (leave empty to view txt): ");
+
+                if (!openwith || strlen(openwith) == 0) {
+                        char **lns = forge_io_read_file_to_lines(to);
+                        size_t lns_n;
+                        for (lns_n = 0; lns[lns_n]; ++lns_n);
+                        forge_viewer *v = forge_viewer_alloc(lns, lns_n, 1);
+                        forge_viewer_display(v);
+                        forge_viewer_free(v);
+                        for (size_t i = 0; i < lns_n; ++i) free(lns[i]);
+                        free(lns);
+                        return 0;
+                }
+                // Save 'openwith' for future uses
                 size_t lns_n;
+                char **lns = forge_io_read_file_to_lines(g_config_filepath);
+                (void)forge_io_truncate_file(g_config_filepath);
+
                 for (lns_n = 0; lns[lns_n]; ++lns_n);
-                forge_viewer *v = forge_viewer_alloc(lns, lns_n, 1);
-                forge_viewer_display(v);
-                forge_viewer_free(v);
+                lns = (char **)realloc(lns, sizeof(char *)*(lns_n+1));
+
+                char cmd_buf[256] = {0};
+                sprintf(cmd_buf, "%s = '%s';", ext, openwith);
+                lns[lns_n++] = strdup(cmd_buf);
+
+                // Adding new variable in-memory (to not re-parse config file).
+                qcl_add_value(&g_config.written_config, ext,
+                              (qcl_value *)qcl_value_string_alloc(openwith));
+                (void)forge_io_write_lines(g_config_filepath, (const char **)lns, lns_n);
+
                 for (size_t i = 0; i < lns_n; ++i) free(lns[i]);
                 free(lns);
+do_cmd:
+                assert(openwith);
+                assert(ext);
+                exec_cmd(openwith, to);
         }
         return 0;
 }
@@ -926,9 +1003,39 @@ display(void)
         forge_ctrl_clear_terminal();
 }
 
+static int
+setup(void)
+{
+        const char *home = forge_io_get_home();
+        if (!home) {
+                fprintf(stderr, "failed to get home directory\n");
+                return 0;
+        }
+
+        sprintf(g_config_filepath, "%s/%s", home, CONFIG_FILENAME);
+
+        if (!forge_io_filepath_exists(g_config_filepath)) {
+                forge_io_create_file(g_config_filepath, 1);
+                return 0;
+        }
+
+        qcl_config config = qcl_parse_file(g_config_filepath);
+        if (!qcl_ok(&config)) {
+                fprintf(stderr, "%s\n", qcl_geterr(&config));
+                fprintf(stderr, "could not parse config\n");
+                return 0;
+        }
+
+        g_config.written_config = config;
+
+        return 1;
+}
+
 int
 main(int argc, char **argv)
 {
+        if (!setup()) any_key();
+
         struct termios t;
         char *filepath = NULL;
         size_t w, h;
